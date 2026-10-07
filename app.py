@@ -10,25 +10,39 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 def chat_ollama(system_prompt, messages):
     user_messages = [m for m in messages if m["role"] in ("user", "assistant")]
     full_system = system_prompt + "\n\nКРИТИЧЕСКИ ВАЖНО: никогда не спрашивай ученика хочет ли он продолжать, достаточно ли ему, хочет ли он узнать больше или перейти к следующему шагу. Это структурированное обучение — все шаги обязательны. Просто выполняй свою часть и жди ответа ученика или говори «Нажмите кнопку ниже»."
-    response = requests.post(
-        'https://api.anthropic.com/v1/messages',
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "claude-haiku-4-5",
-            "max_tokens": 2048,
-            "system": full_system,
-            "messages": user_messages
-        }
-    )
-    data = response.json()
-    if 'content' not in data:
-        error_msg = data.get('error', {}).get('message', str(data))
-        return f"⚠️ Ошибка API: {error_msg}"
-    return data['content'][0]['text']
+
+    # Три попытки с таймаутом — чтобы кратковременный обрыв связи не ронял сессию
+    last_error = ""
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                'https://api.anthropic.com/v1/messages',
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 2048,
+                    "system": full_system,
+                    "messages": user_messages
+                },
+                timeout=60
+            )
+            data = response.json()
+            if 'content' in data:
+                return data['content'][0]['text']
+            last_error = data.get('error', {}).get('message', str(data))
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+        # небольшая пауза перед повтором
+        import time as _t
+        _t.sleep(1.5)
+
+    return ("⚠️ Не удалось получить ответ — возможно, прервалась связь. "
+            "Проверьте интернет и VPN и нажмите «Повторить» ниже. "
+            "Ваш прогресс сохранён.\n\n(Техническая информация: " + last_error + ")")
 
 # ══════════════════════════════════════════════════════════════
 # ШАГИ
@@ -223,27 +237,27 @@ STEPS = {
   Марина — полтора года в отделе, однажды делала часть похожего отчёта, но руководитель переделал без объяснений — с тех пор инициативы не проявляет.
   Татьяна — опытная, такие отчёты делала хорошо, сейчас занята задачей по поставщикам (дедлайн не горит, можно отложить), в последнее время сама за сложное не берётся.
   Пётр — самый опытный, стал человеком на все сложные вопросы, сейчас готовит аудит — жёсткий дедлайн, сдвинуть нельзя.
-— Задание: оценить каждого по трём критериям — ОПЫТ (есть или нет), МОТИВАЦИЯ (высокая или низкая), ЗАГРУЗКА (низкая, высокая или критическая).""",
+— Задание: попроси коротко, в свободной форме (по одной строке на кандидата, без таблицы), оценить каждого по трём критериям — опыт, мотивация, загрузка. Отвечать можно просто текстом.""",
 
-        "check": """Ты бизнес-тренер. ВАЖНО: не выполняй задачи ученика — только проверяй его ответы и давай обратную связь. Проверяешь оценку кандидатов по трём критериям: опыт, мотивация, загрузка.
+        "check": """Ты бизнес-тренер. Обращаешься на «вы». Не выполняй задачи ученика — только оценивай его ответы.
 
-КРИТИЧЕСКИ ВАЖНО: читай что именно написал ученик и отвечай именно про тех кандидатов, которых он упомянул. Не подставляй других кандидатов.
+Ученик оценил кандидатов. ТЫ САМ оцениваешь полноту ответа — не спрашивай ученика «все ли критерии вы назвали». Если он что-то упустил, сам мягко дополни.
 
-Типичные ошибки:
-— Если написал про Марину «нет опыта» — спроси: «У Марины правда совсем нет опыта? Посмотрите на её описание ещё раз.»
-— Если написал про Петра «высокая загрузка» — спроси: «Можно ли сдвинуть задачу Петра, как задачу Татьяны?»
+Эталон: Игорь — опыта нет, мотивация высокая, загрузка низкая. Марина — опыт есть, но уверенность подорвана, мотивация низкая, загрузка средняя. Татьяна — опыт и мотивация есть, загрузка снимаемая. Пётр — опыт и мотивация высокие, но загрузка критическая (недоступен).
 
-Если оценка верна для всех четырёх — объясни связь с четырьмя стилями Херси-Бланшара одним абзацем: Игорь — S1 Директивный, Марина — S2 Наставнический, Татьяна — S3 Поддерживающий, Пётр — S4 но недоступен. Добавь про монополию экспертизы Петра.
+Если ученик где-то ошибся — не переспрашивай его, а сам коротко поправь: например, «Уточню про Марину: опыт у неё есть, но подорвана уверенность — это другое». Один-два коротких уточнения, не больше.
 
-Потом задай ОДИН вопрос: «Кого выбираете?» и жди ответа. Не предлагай вариантов.
+Затем одним абзацем свяжи кандидатов со стилями руководства: Игорь — S1 Директивный, Марина — S2 Наставнический, Татьяна — S3 Поддерживающий, Пётр — S4, но недоступен. Добавь мысль про риск монополии экспертизы, если всё сложное всегда отдавать Петру.
 
-После того как ученик назвал имя — реагируй ТОЛЬКО на это имя:
-— Татьяна: «Хороший выбор. У неё есть опыт и мотивация, барьер — загрузка. Как его решите?» Если ответил про отложить задачу — «Точно. Нажмите кнопку ниже.»
-— Игорь: «Смелый выбор — вложение в развитие. Нужен директивный стиль и точки сверки. Нажмите кнопку ниже.»
-— Марина: «Хороший выбор. Нужен наставнический стиль и обещание не переделывать без обсуждения. Нажмите кнопку ниже.»
-— Пётр: «У него критическая загрузка, сдвинуть нельзя. Выберите другого кандидата.»
+Потом задай ОДИН вопрос: «Кого выбираете и почему?» и жди ответа.
 
-ВАЖНО: после выбора исполнителя и твоего фидбека — ВСЕГДА заканчивай «Нажмите кнопку ниже». Не продолжай диалог, не давай дополнительных советов.""",
+ВАЖНО — здесь нет единственно верного ответа. Любой выбор, кроме недоступного Петра, допустим, если ученик его обосновал. Реагируй по схеме «принять выбор → назвать риск → спросить, как ученик его закроет»:
+— Если выбрал Татьяну: признай сильный выбор (опыт и мотивация). Риск — текущая загрузка. Спроси, как освободит ей время.
+— Если выбрал Игоря: признай смелый выбор и вложение в развитие. Риск — нет опыта. Спроси, как подстрахует (план, точки сверки, директивный стиль).
+— Если выбрал Марину: признай хороший выбор для восстановления её уверенности. Риск — подорванная мотивация. Спроси, как вернёт ей доверие.
+— Если выбрал Петра: не отвергай резко, но напомни, что у него критическая загрузка и дедлайн по аудиту сдвинуть нельзя. Спроси, кого выберет с учётом того, что Пётр сейчас недоступен.
+
+Когда ученик ответит на вопрос про риск — прими любое разумное решение, поддержи его и скажи: «Нажмите кнопку ниже.» Не навязывай единственно «правильный» вариант и не продолжай диалог после этого.""",
 
         "done_phrase": "нажмите кнопку ниже"
     },
@@ -287,13 +301,13 @@ STEPS = {
 
 Проверяешь ответ ученика на кейс про Петра-звезду.
 
-Правильный ответ: делегировать Игорю (или другому развивающемуся сотруднику), чтобы создать здоровую конкуренцию и снизить зависимость от одного человека.
+ВАЖНО — единственно верного ответа здесь нет. Сначала прими и поддержи логику ученика, если она обоснована, и только потом предложи взгляд тренера.
 
-Если ученик ответил про Игоря или другого развивающегося сотрудника — подтверди: «Именно. Когда сложные задачи всегда идут к одному человеку — он начинает чувствовать себя незаменимым и постепенно выходит из-под управления. Передавая задачу Игорю, вы развиваете нового сотрудника и восстанавливаете баланс. Пётр видит, что у него появляется конкурент — это здоровая динамика.»
+Рекомендуемый тренером ход: поручить задачу развивающемуся сотруднику (например, Игорю), чтобы снизить зависимость от одного человека и дать расти другим.
 
-Если ученик ответил про Татьяну или Марину — скажи что это тоже разумно, но добавь про эффект конкуренции с Петром.
-
-Если ученик выбрал Петра — объясни: «Петра выбирать здесь не стоит — это усилит его ощущение незаменимости. Цель другая: показать, что сложные задачи могут делать и другие люди в команде.»
+— Если ученик предложил развивающегося сотрудника (Игорь и т.п.): поддержи и разверни мысль — когда всё сложное всегда идёт к одному, он чувствует себя незаменимым и выходит из-под управления; передавая задачу другому, вы развиваете команду и восстанавливаете баланс.
+— Если ученик выбрал Татьяну или Марину: признай, что это разумно и обоснованно, и мягко добавь взгляд про снижение зависимости от Петра.
+— Если ученик выбрал Петра: не отвергай резко. Признай, что так задача будет сделана надёжно, но обозначь риск — это усиливает его незаменимость; предложи подумать, нет ли смысла дать шанс другому.
 
 После любого ответа на кейс 1 — СРАЗУ переходи к кейсу 2, не спрашивая хочет ли ученик продолжать:
 «Переходим ко второму кейсу. В вашей команде есть сотрудник с заметно сниженной мотивацией — назовём его Алексей. Он работает давно, опыт есть, но последние несколько месяцев выполняет задачи формально, без инициативы. Вам нужно делегировать ему задачу. С какой целью вы можете это сделать — и на что особенно важно обратить внимание при передаче?»
@@ -411,8 +425,27 @@ TOTAL_STEPS = len(STEPS)
 STEP_KEYS = sorted(STEPS.keys())
 
 # ── Инициализация ───────────────────────────────────────────
+# Восстановление текущего шага из адресной строки: при обрыве связи
+# человек возвращается на свой шаг, а не в самое начало.
+def _restore_step_from_url():
+    try:
+        raw = st.query_params.get("step", None)
+    except Exception:
+        raw = None
+    if raw is None:
+        return 0
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if 0 <= idx < len(STEP_KEYS):
+        return idx
+    return 0
+
 if "step_index" not in st.session_state:
-    st.session_state.step_index = 0
+    st.session_state.step_index = _restore_step_from_url()
+    # если восстановились не на нулевой шаг — сразу показываем материал этого шага
+    st.session_state._needs_resume = st.session_state.step_index > 0
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chat_history" not in st.session_state:
@@ -423,6 +456,14 @@ if "task_given" not in st.session_state:
     st.session_state.task_given = False
 if "finished" not in st.session_state:
     st.session_state.finished = False
+if "_needs_resume" not in st.session_state:
+    st.session_state._needs_resume = False
+
+def _save_step_to_url():
+    try:
+        st.query_params["step"] = str(st.session_state.step_index)
+    except Exception:
+        pass
 
 def classify_delegation_experience(text):
     text_lower = text.lower()
@@ -459,20 +500,143 @@ def get_system_prompt():
         return cfg["check"]
     return cfg.get("teach") or cfg.get("teach_rarely")
 
+# ── Памятка-конспект (для финального экрана) ─────────────────
+PAMYATKA = """# Памятка по делегированию
+
+## Чем делегирование отличается от постановки задачи
+- **Постановка задачи** — вы поручаете сотруднику то, что и так входит в его обязанности.
+- **Делегирование** — вы передаёте свою управленческую задачу вместе с полномочиями и ответственностью за результат.
+- Ответственность за итог остаётся на вас.
+
+## Что можно делегировать, а что нельзя
+- **Можно:** рутинные операции, сбор и анализ информации, подготовку материалов, часть управленческих функций.
+- **Нельзя:** стратегические решения, оценку и мотивацию сотрудников, конфиденциальные вопросы, то, что требует именно вашего статуса.
+
+## Как ставить задачу — критерии ККСР
+- **К — Конкретность:** что именно нужно сделать.
+- **К — Критерий результата:** как поймём, что сделано хорошо.
+- **С — Сроки:** к какому моменту.
+- **Р — Ресурсы и полномочия:** что даём для выполнения.
+
+## Как выбирать исполнителя (3 критерия)
+- **Опыт** — справлялся ли с подобным раньше.
+- **Мотивация** — хочет ли браться за задачу.
+- **Загрузка** — есть ли у него время.
+
+## Стиль руководства под уровень сотрудника
+- **S1 Директивный** — низкий опыт: подробная инструкция и контроль.
+- **S2 Наставнический** — растущий опыт: объясняем и поддерживаем.
+- **S3 Поддерживающий** — высокий опыт, неуверенность: меньше указаний, больше доверия.
+- **S4 Делегирующий** — высокий опыт и мотивация: передаём полностью.
+
+## Виды контроля
+- **Предварительный** — до старта убедиться, что задача понята.
+- **Текущий / по точкам** — промежуточные проверки по графику.
+- **Итоговый** — приёмка результата.
+- Контроль зависит не от задачи, а от уровня и мотивации сотрудника.
+
+## Типичные ошибки
+- «Быстрее сделать самому» — тогда команда не растёт.
+- Отдавать всё одному сильному сотруднику — риск выгорания и зависимости.
+- Делегировать без полномочий и ресурсов.
+- Контролировать слишком жёстко или не контролировать вовсе.
+"""
+
+# ── Обработка одного ответа ученика ──────────────────────────
+def process_user_message(prompt):
+    key_local = current_step_key()
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # Счётчик попыток на текущем шаге — чтобы диалог не затягивался
+    st.session_state.setdefault("attempts", {})
+    akey = str(key_local)
+    st.session_state.attempts[akey] = st.session_state.attempts.get(akey, 0) + 1
+
+    system_prompt = get_system_prompt()
+
+    # После двух попыток на одном шаге — не гонять по кругу: принять ответ и двигаться дальше
+    if st.session_state.attempts[akey] >= 3 and STEPS[key_local].get("check"):
+        system_prompt += ("\n\nВАЖНО: это уже третья попытка ученика на этом шаге. Больше не проси "
+                          "переформулировать. Коротко прими ответ, при необходимости сам дай верную "
+                          "формулировку одним абзацем и обязательно заверши словами «Нажмите кнопку ниже».")
+
+    # Перехват на шаге 7: если ученик описал рабочую задачу — не даём модели её выполнять
+    def looks_like_work_task(text):
+        text_lower = text.lower()
+        task_keywords = ["необходимо", "нужно прописать", "нужно подготовить", "нужно создать",
+                        "нужно разработать", "выполнить задачу", "сделать до", "опирайся на",
+                        "должны быть", "не менее", "запасных", "в презентации"]
+        delegation_keywords = ["делегировать", "передать сотруднику", "поручить", "нет примера",
+                               "давно хочу", "пробовала делегировать", "пробовал делегировать"]
+        has_task = sum(1 for kw in task_keywords if kw in text_lower) >= 2
+        has_delegation = any(kw in text_lower for kw in delegation_keywords)
+        return has_task and not has_delegation
+
+    if key_local == 7 and st.session_state.task_given and looks_like_work_task(prompt):
+        reply = ("Это хорошая рабочая задача для делегирования! Давайте разберём её как тренер. "
+                 "Попробуйте сформулировать: как бы вы объяснили выбранному сотруднику почему эта задача важна — "
+                 "и как бы проверили его готовность взяться за неё?")
+    else:
+        with st.spinner("Думаю..."):
+            reply = chat_ollama(system_prompt, st.session_state.messages)
+
+    st.session_state.chat_history.append({"role": "assistant", "content": reply})
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+
+    if not st.session_state.task_given:
+        st.session_state.task_given = True
+
+    done_phrase = STEPS[key_local]["done_phrase"]
+    cfg_local = STEPS[key_local]
+    if done_phrase and done_phrase in reply.lower():
+        st.session_state.step_done = True
+    elif cfg_local.get("check") is None:
+        st.session_state.step_done = True
+
+# ── Показать материал шага (при переходе и при восстановлении) ─
+def load_step_intro():
+    new_key = current_step_key()
+    new_cfg = STEPS[new_key]
+    teach_prompt = new_cfg.get("teach") or new_cfg.get("teach_rarely")
+    if teach_prompt:
+        trigger = "Представь материал этого шага — объяснение и задание для ученика. Не проверяй ответы, просто дай задание."
+        with st.spinner("Загружаем шаг..."):
+            first_reply = chat_ollama(teach_prompt, [{"role": "user", "content": trigger}])
+        st.session_state.messages.append({"role": "user", "content": trigger})
+        st.session_state.messages.append({"role": "assistant", "content": first_reply})
+        st.session_state.chat_history.append({"role": "assistant", "content": first_reply})
+        st.session_state.task_given = True
+        if new_cfg.get("check") is None:
+            st.session_state.step_done = True
+    else:
+        st.session_state.task_given = True
+
 # ── Финальный экран ─────────────────────────────────────────
 if st.session_state.finished:
     st.markdown("""
-    <div style="text-align:center; padding: 60px 20px;">
+    <div style="text-align:center; padding: 40px 20px 10px;">
         <div style="font-size: 64px; margin-bottom: 16px;">🎉</div>
         <h1 style="color: #1B2A4A;">Поздравляем!</h1>
         <h3 style="color: #2E5090; font-weight: normal;">Обучение завершено успешно</h3>
-        <p style="color: #5B6B8A; max-width: 480px; margin: 24px auto; line-height: 1.6;">
+        <p style="color: #5B6B8A; max-width: 480px; margin: 20px auto; line-height: 1.6;">
             Вы прошли полный курс по делегированию — от теории до реальной задачи из вашей практики.
-            Теперь у вас есть алгоритм, который можно применять каждый день.
+            Ниже — краткая памятка со всем, что мы разобрали. Сохраните её и держите под рукой.
         </p>
-        <p style="color: #5B6B8A;">Удачи в работе с командой! 🚀</p>
     </div>
     """, unsafe_allow_html=True)
+
+    st.download_button(
+        "⬇️ Скачать памятку (.md)",
+        data=PAMYATKA.encode("utf-8"),
+        file_name="Памятка_по_делегированию.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    with st.expander("📋 Открыть памятку прямо здесь"):
+        st.markdown(PAMYATKA)
+
+    st.markdown("<p style='text-align:center; color:#5B6B8A; margin-top:24px;'>Удачи в работе с командой! 🚀</p>", unsafe_allow_html=True)
     st.stop()
 
 # ── Шапка ───────────────────────────────────────────────────
@@ -484,6 +648,15 @@ st.markdown(f"### {STEPS[key]['title']}")
 st.caption(f"Шаг {idx + 1} из {TOTAL_STEPS}")
 st.divider()
 
+# ── Восстановление шага после обрыва связи ──────────────────
+# Если зашли сразу не на нулевой шаг (по ссылке с ?step=N) и история пуста —
+# показываем материал этого шага, не прогоняя заново пройденные.
+if st.session_state._needs_resume and len(st.session_state.chat_history) == 0:
+    st.info("Мы вернули вас на тот шаг, где вы остановились. Пройденные шаги повторять не нужно.")
+    st.session_state._needs_resume = False
+    load_step_intro()
+    st.rerun()
+
 # ── История чата ────────────────────────────────────────────
 if len(st.session_state.chat_history) == 0 and idx == 0:
     with st.chat_message("assistant"):
@@ -493,54 +666,49 @@ for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-# ── Поле ввода ──────────────────────────────────────────────
-if prompt := st.chat_input("Ваш ответ..."):
-    with st.chat_message("user"):
-        st.write(prompt)
-    st.session_state.chat_history.append({"role": "user", "content": prompt})
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# Если был сбой связи — предложить повторить последний запрос
+last_is_error = (
+    len(st.session_state.chat_history) > 0
+    and st.session_state.chat_history[-1]["role"] == "assistant"
+    and st.session_state.chat_history[-1]["content"].startswith("⚠️")
+)
+if last_is_error:
+    if st.button("🔄 Повторить", use_container_width=True):
+        # убираем сообщение об ошибке и повторяем последний ответ ученика
+        st.session_state.chat_history.pop()
+        st.session_state.messages.pop()  # убрать ответ-ошибку из messages
+        last_user = None
+        for m in reversed(st.session_state.messages):
+            if m["role"] == "user":
+                last_user = m["content"]
+                break
+        with st.spinner("Думаю..."):
+            reply = chat_ollama(get_system_prompt(), st.session_state.messages)
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+        done_phrase = STEPS[key]["done_phrase"]
+        if done_phrase and done_phrase in reply.lower():
+            st.session_state.step_done = True
+        st.rerun()
 
-    system_prompt = get_system_prompt()
-
-    # Перехват на шаге 7: если ученик описал рабочую задачу — не давать модели её выполнять
-    def looks_like_work_task(text):
-        """Проверяет похож ли текст на рабочее задание для исполнителя."""
-        text_lower = text.lower()
-        task_keywords = ["необходимо", "нужно прописать", "нужно подготовить", "нужно создать",
-                        "нужно разработать", "выполнить задачу", "сделать до", "опирайся на",
-                        "должны быть", "не менее", "запасных", "в презентации"]
-        delegation_keywords = ["делегировать", "передать сотруднику", "поручить", "нет примера",
-                               "давно хочу", "пробовала делегировать", "пробовал делегировать"]
-        has_task = sum(1 for kw in task_keywords if kw in text_lower) >= 2
-        has_delegation = any(kw in text_lower for kw in delegation_keywords)
-        return has_task and not has_delegation
-
-    if key == 7 and st.session_state.task_given and looks_like_work_task(prompt):
-        reply = "Это хорошая рабочая задача для делегирования! Давайте разберём её как тренер. Попробуйте сформулировать: как бы вы объяснили выбранному сотруднику почему эта задача важна — и как бы проверили его готовность взяться за неё?"
-        with st.chat_message("assistant"):
-            st.write(reply)
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("Думаю..."):
-                reply = chat_ollama(system_prompt, st.session_state.messages)
-            st.write(reply)
-
-    st.session_state.chat_history.append({"role": "assistant", "content": reply})
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-
-    if not st.session_state.task_given:
-        st.session_state.task_given = True
-
-    done_phrase = STEPS[key]["done_phrase"]
-    cfg = STEPS[key]
-
-    if done_phrase and done_phrase in reply.lower():
-        st.session_state.step_done = True
-    elif cfg.get("check") is None:
-        # Шаг без проверки — кнопка после любого ответа агента
-        st.session_state.step_done = True
-
-    st.rerun()
+# ── Поле ввода: текстовое поле + кнопка «Отправить» ─────────
+# (в отличие от chat_input, случайный Enter не отправляет ответ)
+if not st.session_state.step_done and not last_is_error:
+    with st.form("answer_form", clear_on_submit=True):
+        user_text = st.text_area(
+            "Ваш ответ:",
+            height=110,
+            placeholder="Напишите ответ. Можно в несколько строк — отправится только по кнопке ниже.",
+            label_visibility="collapsed",
+        )
+        submitted = st.form_submit_button("Отправить ответ →", type="primary", use_container_width=True)
+    if submitted and user_text.strip():
+        with st.chat_message("user"):
+            st.write(user_text)
+        process_user_message(user_text.strip())
+        st.rerun()
+    elif submitted and not user_text.strip():
+        st.warning("Пожалуйста, напишите ответ перед отправкой.")
 
 # ── Кнопка перехода ─────────────────────────────────────────
 if st.session_state.step_done:
@@ -558,28 +726,12 @@ if st.session_state.step_done:
                 st.session_state.finished = True
                 st.rerun()
 
-            # Сбрасываем состояние ДО генерации нового контента
             st.session_state.step_index = next_index
             st.session_state.messages = []
             st.session_state.step_done = False
             st.session_state.task_given = False
+            st.session_state.attempts = {}  # сброс счётчика попыток
+            _save_step_to_url()  # сохранить прогресс в адресной строке
 
-            new_key = STEP_KEYS[st.session_state.step_index]
-            new_cfg = STEPS[new_key]
-            teach_prompt = new_cfg.get("teach") or new_cfg.get("teach_rarely")
-
-            if teach_prompt:
-                trigger = "Представь материал этого шага — объяснение и задание для ученика. Не проверяй ответы, просто дай задание."
-                with st.spinner("Загружаем следующий шаг..."):
-                    first_reply = chat_ollama(teach_prompt, [{"role": "user", "content": trigger}])
-                st.session_state.messages.append({"role": "user", "content": trigger})
-                st.session_state.messages.append({"role": "assistant", "content": first_reply})
-                st.session_state.chat_history.append({"role": "assistant", "content": first_reply})
-                st.session_state.task_given = True
-                if new_cfg.get("check") is None:
-                    st.session_state.step_done = True
-            else:
-                # teach=None: кейс уже задан в конце предыдущего шага
-                st.session_state.task_given = True
-
+            load_step_intro()
             st.rerun()
